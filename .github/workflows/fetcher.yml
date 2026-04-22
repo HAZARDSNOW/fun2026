@@ -1,9 +1,9 @@
 name: Multi-Channel Fetcher
 
 on:
-  workflow_dispatch:  # برای تست دستی
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 0,4,8,16 * * *'
+  workflow_dispatch:
 
 jobs:
   update_logs:
@@ -12,9 +12,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Fetch All Posts From Worker
+      - name: Fetch and Clean Data
         run: |
-          CHANNELS=("asrnovin_ir")
+          # لیست کانال‌ها
+          CHANNELS=("asrnovin_ir" "golboo1" "sillymohsen" "sootehdelan333")
           DATE=$(date +'%Y-%m-%d_%H-%M')
           
           mkdir -p logs
@@ -23,40 +24,72 @@ jobs:
             mkdir -p "logs/$CHANNEL"
             FILENAME="logs/$CHANNEL/${CHANNEL}_$DATE.txt"
             
-            echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
+            echo "Fetching data for @$CHANNEL..."
+            curl -sL --max-time 30 "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp_rss.xml
             
-            # دریافت کامل XML از ورکر
-            curl -sL "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp.xml
-            
-            # استخراج همه آیتم‌ها با روش ساده و مطمئن
-            # هر آیتم رو جداگانه پردازش می‌کنیم
-            csplit -sz -f item_ temp.xml '/<\/item>/' '{*}' 2>/dev/null
-            
-            for item_file in item_*; do
-              if [ -f "$item_file" ]; then
-                # استخراج date
-                DATE_LINE=$(grep -o '<pubDate>.*</pubDate>' "$item_file" | sed 's/<pubDate>//;s/<\/pubDate>//')
+            if [ -s temp_rss.xml ]; then
+              echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
+              
+              # روش جدید: پردازش خط به خط با حفظ متن کامل چندخطی
+              awk '
+              BEGIN { RS = "</item>"; FS = "\n" }
+              {
+                date = ""
+                content = ""
+                full_content = ""
+                in_cdata = 0
                 
-                # استخراج content (حذف CDATA و خطوط جدید)
-                CONTENT=$(grep -o '<description>.*</description>' "$item_file" | sed 's/<description>//;s/<\/description>//;s/<!\[CDATA\[//;s/\]\]>//')
+                for (i = 1; i <= NF; i++) {
+                  line = $i
+                  
+                  # استخراج pubDate
+                  if (match(line, /<pubDate>(.*)<\/pubDate>/, arr)) {
+                    date = arr[1]
+                  }
+                  
+                  # شروع CDATA
+                  if (line ~ /<description><!\[CDATA\[/) {
+                    in_cdata = 1
+                    # استخراج بخش اول بعد از CDATA[
+                    sub(/.*<!\[CDATA\[/, "", line)
+                    full_content = line
+                  }
+                  # داخل CDATA (خطوط میانی)
+                  else if (in_cdata && line !~ /\]\]><\/description>/) {
+                    full_content = full_content "\n" line
+                  }
+                  # پایان CDATA
+                  else if (in_cdata && line ~ /\]\]><\/description>/) {
+                    sub(/\].*/, "", line)
+                    full_content = full_content "\n" line
+                    in_cdata = 0
+                    # حذف whitespace اضافی از اول و آخر
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", full_content)
+                    content = full_content
+                  }
+                }
                 
-                if [ -n "$DATE_LINE" ] && [ -n "$CONTENT" ]; then
-                  echo "Date: $DATE_LINE" >> "$FILENAME"
-                  echo "Content: $CONTENT" >> "$FILENAME"
-                  echo "---" >> "$FILENAME"
-                fi
-                rm -f "$item_file"
-              fi
-            done
+                if (date != "" && content != "") {
+                  print "Date: " date
+                  print "Content: " content
+                  print "---"
+                }
+              }
+              ' temp_rss.xml >> "$FILENAME"
+              
+              ITEM_COUNT=$(grep -c "^Date:" "$FILENAME" 2>/dev/null || echo "0")
+              echo "Saved $ITEM_COUNT items for @$CHANNEL"
+            else
+              echo "⚠️ Warning: Empty response for @$CHANNEL"
+            fi
             
-            ITEM_COUNT=$(grep -c "^Date:" "$FILENAME")
-            echo "✅ Saved $ITEM_COUNT items for @$CHANNEL"
-            
-            rm -f temp.xml
+            rm -f temp_rss.xml
           done
           
-          # حذف فایل‌های قدیمی
-          find logs/ -type f -mtime +2 -delete 2>/dev/null
+          # مدیریت حجم فایل‌ها
+          if [ -d logs ]; then
+            find logs/ -type f -mtime +2 -delete 2>/dev/null
+          fi
 
       - name: Commit and Push
         run: |
@@ -66,4 +99,6 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "Sync logs: $(date +'%Y-%m-%d %H:%M')"
             git push
+          else
+            echo "No changes to commit"
           fi
