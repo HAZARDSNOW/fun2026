@@ -14,7 +14,6 @@ jobs:
 
       - name: Fetch and Clean Data
         run: |
-          # لیست کانال‌ها
           CHANNELS=("asrnovin_ir")
           DATE=$(date +'%Y-%m-%d_%H-%M')
           
@@ -24,15 +23,35 @@ jobs:
             mkdir -p "logs/$CHANNEL"
             FILENAME="logs/$CHANNEL/${CHANNEL}_$DATE.txt"
             
-            echo "Fetching data for @$CHANNEL..."
-            curl -sL --max-time 30 "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp_rss.xml
+            echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
             
-            if [ -s temp_rss.xml ]; then
-              echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
+            # اسکرول خودکار برای گرفتن همه پست‌ها
+            BEFORE=""
+            TOTAL_ITEMS=0
+            MAX_ITEMS=200  # حداکثر تعداد پست مورد نیاز
+            
+            while [ $TOTAL_ITEMS -lt $MAX_ITEMS ]; do
+              # ساخت URL با پارامتر before
+              if [ -z "$BEFORE" ]; then
+                URL="https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL"
+              else
+                URL="https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL&before=$BEFORE"
+              fi
               
-              # روش جدید: پردازش خط به خط با حفظ متن کامل چندخطی
-              awk '
-              BEGIN { RS = "</item>"; FS = "\n" }
+              echo "Fetching: $URL"
+              curl -sL --max-time 30 "$URL" -o temp_rss.xml
+              
+              if [ ! -s temp_rss.xml ]; then
+                echo "⚠️ Empty response, stopping..."
+                break
+              fi
+              
+              # استخراج آخرین message-id برای before بعدی
+              LAST_ID=$(grep -oP '(?<=https://t\.me/'"$CHANNEL"'/)\d+' temp_rss.xml | tail -1)
+              
+              # استخراج و ذخیره محتوا با حفظ خطوط چندخطی
+              ITEM_COUNT=$(awk -v channel="$CHANNEL" '
+              BEGIN { RS = "</item>"; FS = "\n"; count=0 }
               {
                 date = ""
                 content = ""
@@ -42,28 +61,22 @@ jobs:
                 for (i = 1; i <= NF; i++) {
                   line = $i
                   
-                  # استخراج pubDate
                   if (match(line, /<pubDate>(.*)<\/pubDate>/, arr)) {
                     date = arr[1]
                   }
                   
-                  # شروع CDATA
                   if (line ~ /<description><!\[CDATA\[/) {
                     in_cdata = 1
-                    # استخراج بخش اول بعد از CDATA[
                     sub(/.*<!\[CDATA\[/, "", line)
                     full_content = line
                   }
-                  # داخل CDATA (خطوط میانی)
                   else if (in_cdata && line !~ /\]\]><\/description>/) {
                     full_content = full_content "\n" line
                   }
-                  # پایان CDATA
                   else if (in_cdata && line ~ /\]\]><\/description>/) {
                     sub(/\].*/, "", line)
                     full_content = full_content "\n" line
                     in_cdata = 0
-                    # حذف whitespace اضافی از اول و آخر
                     gsub(/^[[:space:]]+|[[:space:]]+$/, "", full_content)
                     content = full_content
                   }
@@ -73,23 +86,40 @@ jobs:
                   print "Date: " date
                   print "Content: " content
                   print "---"
+                  count++
                 }
               }
-              ' temp_rss.xml >> "$FILENAME"
+              END { print count }
+              ' temp_rss.xml >> "$FILENAME")
               
-              ITEM_COUNT=$(grep -c "^Date:" "$FILENAME" 2>/dev/null || echo "0")
-              echo "Saved $ITEM_COUNT items for @$CHANNEL"
-            else
-              echo "⚠️ Warning: Empty response for @$CHANNEL"
-            fi
+              # استخراج تعداد آیتم‌های این صفحه
+              PAGE_COUNT=$(tail -1 <<< "$ITEM_COUNT")
+              TOTAL_ITEMS=$((TOTAL_ITEMS + PAGE_COUNT))
+              
+              echo "Got $PAGE_COUNT items (Total: $TOTAL_ITEMS)"
+              
+              # اگر کمتر از 20 آیتم گرفت، یعنی به انتها رسیدیم
+              if [ "$PAGE_COUNT" -lt 20 ]; then
+                echo "Reached the end of channel"
+                break
+              fi
+              
+              # تنظیم before برای صفحه بعد
+              BEFORE="$LAST_ID"
+              
+              # حذف خط آخر (عدد count) از فایل
+              sed -i '$d' "$FILENAME"
+              
+              # تاخیر برای جلوگیری از rate limit
+              sleep 2
+            done
             
+            echo "✅ Total saved: $TOTAL_ITEMS items for @$CHANNEL"
             rm -f temp_rss.xml
           done
           
-          # مدیریت حجم فایل‌ها
-          if [ -d logs ]; then
-            find logs/ -type f -mtime +2 -delete 2>/dev/null
-          fi
+          # حذف فایل‌های قدیمی‌تر از ۲ روز
+          find logs/ -type f -mtime +2 -delete 2>/dev/null
 
       - name: Commit and Push
         run: |
