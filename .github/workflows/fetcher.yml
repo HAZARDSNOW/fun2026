@@ -12,9 +12,14 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
+      - name: Install XML Parser
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xmlstarlet
+
       - name: Fetch and Clean Data
         run: |
-          # ۱. لیست کانال‌ها (نام یوزرنیم تلگرام بدون @)
+          # لیست کانال‌ها (نام یوزرنیم تلگرام بدون @)
           CHANNELS=("asrnovin_ir" "another_channel")
           DATE=$(date +'%Y-%m-%d_%H-%M')
           
@@ -25,32 +30,52 @@ jobs:
             FILENAME="logs/$CHANNEL/${CHANNEL}_$DATE.txt"
             
             # دریافت خروجی از ورکر
+            echo "Fetching data for @$CHANNEL..."
             curl -sL --max-time 30 "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp_rss.xml
             
             if [ -s temp_rss.xml ]; then
               echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
               
-              # استخراج تاریخ و متن کامل با استفاده از Perl برای دقت بالا
-              # این دستور محتوای بین CDATA را به طور کامل استخراج می‌کند
-              perl -ne 'print "Date: $1\n" if /<pubDate>(.*?)<\/pubDate>/; print "Content: $1\n\n" if /<description><!\[CDATA\[(.*?)\]\]><\/description>/' temp_rss.xml >> "$FILENAME"
+              # استخراج همزمان Date و Content با xmlstarlet
+              xmlstarlet sel -t -m "//item" -v "pubDate" -o "|" -v "description" -n temp_rss.xml 2>/dev/null | while IFS='|' read -r date desc; do
+                # حذف CDATA wrapper و whitespace اضافی
+                desc=$(echo "$desc" | sed 's/<!\[CDATA\[//;s/\]\]>//;s/^[[:space:]]*//;s/[[:space:]]*$//')
+                # حذف تگ‌های HTML اضافی اگه باشه
+                desc=$(echo "$desc" | sed 's/<[^>]*>//g')
+                
+                if [ -n "$date" ] && [ -n "$desc" ]; then
+                  echo "Date: $date" >> "$FILENAME"
+                  echo "Content: $desc" >> "$FILENAME"
+                  echo "---" >> "$FILENAME"
+                fi
+              done
+              
+              # نمایش آمار ذخیره شده
+              ITEM_COUNT=$(grep -c "^Date:" "$FILENAME" 2>/dev/null || echo "0")
+              echo "Saved $ITEM_COUNT items for @$CHANNEL"
+            else
+              echo "⚠️ Warning: Empty response for @$CHANNEL"
             fi
+            
             rm -f temp_rss.xml
           done
 
-          # ۲. مدیریت حجم فایل‌ها (جلوگیری از پر شدن ریپازیتوری)
-          CURRENT_LOGS_SIZE=$(du -sk logs | cut -f1)
-          MAX_ALLOWED_KB=8192 # ۸ مگابایت
+          # مدیریت حجم فایل‌ها (جلوگیری از پر شدن ریپازیتوری)
+          if [ -d logs ]; then
+            CURRENT_LOGS_SIZE=$(du -sk logs 2>/dev/null | cut -f1)
+            MAX_ALLOWED_KB=8192 # ۸ مگابایت
 
-          echo "Current Logs Size: $CURRENT_LOGS_SIZE KB"
+            echo "Current Logs Size: ${CURRENT_LOGS_SIZE:-0} KB"
 
-          if [ $CURRENT_LOGS_SIZE -gt $MAX_ALLOWED_KB ]; then
-            echo "Logs folder is too heavy. Deleting old files..."
-            # حذف ۵۰ فایل قدیمی‌تر برای باز شدن فضا
-            find logs -type f -name "*.txt" -printf '%T@ %p\n' | sort -n | cut -d' ' -f2- | head -n 50 | xargs rm -f
+            if [ "${CURRENT_LOGS_SIZE:-0}" -gt $MAX_ALLOWED_KB ]; then
+              echo "Logs folder is too heavy. Deleting old files..."
+              # حذف ۵۰ فایل قدیمی‌تر برای باز شدن فضا
+              find logs -type f -name "*.txt" -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2- | head -n 50 | xargs rm -f 2>/dev/null
+            fi
+
+            # حذف فایل‌های قدیمی‌تر از ۲ روز
+            find logs/ -type f -mtime +2 -delete 2>/dev/null
           fi
-
-          # ۳. حذف فایل‌های قدیمی‌تر از ۲ روز
-          find logs/ -type f -mtime +2 -delete
 
       - name: Commit and Push
         run: |
@@ -60,4 +85,6 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "Sync logs: $(date +'%Y-%m-%d %H:%M')"
             git push
+          else
+            echo "No changes to commit"
           fi
