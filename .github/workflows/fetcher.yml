@@ -2,7 +2,7 @@ name: Multi-Channel Fetcher
 
 on:
   schedule:
-    - cron: '0 4,8,16,0 * * *'
+    - cron: '0 0,4,8,16 * * *' # ۴ بار در روز
   workflow_dispatch:
 
 jobs:
@@ -14,40 +14,42 @@ jobs:
 
       - name: Fetch and Clean Data
         run: |
+          # ۱. لیست کانال‌ها (نام یوزرنیم تلگرام بدون @)
           CHANNELS=("asrnovin_ir" "another_channel")
           DATE=$(date +'%Y-%m-%d_%H-%M')
           
-          # ایجاد پوشه اصلی اگر وجود ندارد
           mkdir -p logs
           
           for CHANNEL in "${CHANNELS[@]}"; do
             mkdir -p "logs/$CHANNEL"
             FILENAME="logs/$CHANNEL/${CHANNEL}_$DATE.txt"
             
+            # دریافت خروجی از ورکر
             curl -sL --max-time 30 "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp_rss.xml
             
             if [ -s temp_rss.xml ]; then
               echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
-              grep -E '<pubDate>|<description>' temp_rss.xml | \
-              sed -e 's/<[^>]*>//g' -e 's/<!\[CDATA\[//g' -e 's/\]\]>//g' -e 's/^[[:space:]]*//' >> "$FILENAME"
+              
+              # استخراج تاریخ و متن کامل با استفاده از Perl برای دقت بالا
+              # این دستور محتوای بین CDATA را به طور کامل استخراج می‌کند
+              perl -ne 'print "Date: $1\n" if /<pubDate>(.*?)<\/pubDate>/; print "Content: $1\n\n" if /<description><!\[CDATA\[(.*?)\]\]><\/description>/' temp_rss.xml >> "$FILENAME"
             fi
             rm -f temp_rss.xml
           done
 
-          # --- مدیریت حجم فایل‌های جاری (برای ZIP خروجی) ---
-          # محاسبه حجم پوشه logs به کیلوبایت
+          # ۲. مدیریت حجم فایل‌ها (جلوگیری از پر شدن ریپازیتوری)
           CURRENT_LOGS_SIZE=$(du -sk logs | cut -f1)
-          MAX_ALLOWED_KB=8192 # ۸ مگابایت رزرو می‌کنیم که با بقیه فایل‌ها از ۱۰ رد نشود
+          MAX_ALLOWED_KB=8192 # ۸ مگابایت
 
           echo "Current Logs Size: $CURRENT_LOGS_SIZE KB"
 
           if [ $CURRENT_LOGS_SIZE -gt $MAX_ALLOWED_KB ]; then
             echo "Logs folder is too heavy. Deleting old files..."
-            # حذف فایل‌ها از قدیمی به جدید تا زمانی که حجم به زیر ۵ مگابایت برسد
+            # حذف ۵۰ فایل قدیمی‌تر برای باز شدن فضا
             find logs -type f -name "*.txt" -printf '%T@ %p\n' | sort -n | cut -d' ' -f2- | head -n 50 | xargs rm -f
           fi
 
-          # حذف روزانه فایل‌های قدیمی (بیشتر از ۲ روز) برای خلوت ماندن
+          # ۳. حذف فایل‌های قدیمی‌تر از ۲ روز
           find logs/ -type f -mtime +2 -delete
 
       - name: Commit and Push
