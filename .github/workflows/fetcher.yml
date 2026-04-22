@@ -1,9 +1,9 @@
 name: Multi-Channel Fetcher
 
 on:
+  workflow_dispatch:  # برای تست دستی
   schedule:
-    - cron: '0 0,4,8,16 * * *'
-  workflow_dispatch:
+    - cron: '0 */4 * * *'
 
 jobs:
   update_logs:
@@ -12,7 +12,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Fetch and Clean Data
+      - name: Fetch All Posts From Worker
         run: |
           CHANNELS=("asrnovin_ir")
           DATE=$(date +'%Y-%m-%d_%H-%M')
@@ -25,100 +25,37 @@ jobs:
             
             echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
             
-            # اسکرول خودکار برای گرفتن همه پست‌ها
-            BEFORE=""
-            TOTAL_ITEMS=0
-            MAX_ITEMS=200  # حداکثر تعداد پست مورد نیاز
+            # دریافت کامل XML از ورکر
+            curl -sL "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp.xml
             
-            while [ $TOTAL_ITEMS -lt $MAX_ITEMS ]; do
-              # ساخت URL با پارامتر before
-              if [ -z "$BEFORE" ]; then
-                URL="https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL"
-              else
-                URL="https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL&before=$BEFORE"
-              fi
-              
-              echo "Fetching: $URL"
-              curl -sL --max-time 30 "$URL" -o temp_rss.xml
-              
-              if [ ! -s temp_rss.xml ]; then
-                echo "⚠️ Empty response, stopping..."
-                break
-              fi
-              
-              # استخراج آخرین message-id برای before بعدی
-              LAST_ID=$(grep -oP '(?<=https://t\.me/'"$CHANNEL"'/)\d+' temp_rss.xml | tail -1)
-              
-              # استخراج و ذخیره محتوا با حفظ خطوط چندخطی
-              ITEM_COUNT=$(awk -v channel="$CHANNEL" '
-              BEGIN { RS = "</item>"; FS = "\n"; count=0 }
-              {
-                date = ""
-                content = ""
-                full_content = ""
-                in_cdata = 0
+            # استخراج همه آیتم‌ها با روش ساده و مطمئن
+            # هر آیتم رو جداگانه پردازش می‌کنیم
+            csplit -sz -f item_ temp.xml '/<\/item>/' '{*}' 2>/dev/null
+            
+            for item_file in item_*; do
+              if [ -f "$item_file" ]; then
+                # استخراج date
+                DATE_LINE=$(grep -o '<pubDate>.*</pubDate>' "$item_file" | sed 's/<pubDate>//;s/<\/pubDate>//')
                 
-                for (i = 1; i <= NF; i++) {
-                  line = $i
-                  
-                  if (match(line, /<pubDate>(.*)<\/pubDate>/, arr)) {
-                    date = arr[1]
-                  }
-                  
-                  if (line ~ /<description><!\[CDATA\[/) {
-                    in_cdata = 1
-                    sub(/.*<!\[CDATA\[/, "", line)
-                    full_content = line
-                  }
-                  else if (in_cdata && line !~ /\]\]><\/description>/) {
-                    full_content = full_content "\n" line
-                  }
-                  else if (in_cdata && line ~ /\]\]><\/description>/) {
-                    sub(/\].*/, "", line)
-                    full_content = full_content "\n" line
-                    in_cdata = 0
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", full_content)
-                    content = full_content
-                  }
-                }
+                # استخراج content (حذف CDATA و خطوط جدید)
+                CONTENT=$(grep -o '<description>.*</description>' "$item_file" | sed 's/<description>//;s/<\/description>//;s/<!\[CDATA\[//;s/\]\]>//')
                 
-                if (date != "" && content != "") {
-                  print "Date: " date
-                  print "Content: " content
-                  print "---"
-                  count++
-                }
-              }
-              END { print count }
-              ' temp_rss.xml >> "$FILENAME")
-              
-              # استخراج تعداد آیتم‌های این صفحه
-              PAGE_COUNT=$(tail -1 <<< "$ITEM_COUNT")
-              TOTAL_ITEMS=$((TOTAL_ITEMS + PAGE_COUNT))
-              
-              echo "Got $PAGE_COUNT items (Total: $TOTAL_ITEMS)"
-              
-              # اگر کمتر از 20 آیتم گرفت، یعنی به انتها رسیدیم
-              if [ "$PAGE_COUNT" -lt 20 ]; then
-                echo "Reached the end of channel"
-                break
+                if [ -n "$DATE_LINE" ] && [ -n "$CONTENT" ]; then
+                  echo "Date: $DATE_LINE" >> "$FILENAME"
+                  echo "Content: $CONTENT" >> "$FILENAME"
+                  echo "---" >> "$FILENAME"
+                fi
+                rm -f "$item_file"
               fi
-              
-              # تنظیم before برای صفحه بعد
-              BEFORE="$LAST_ID"
-              
-              # حذف خط آخر (عدد count) از فایل
-              sed -i '$d' "$FILENAME"
-              
-              # تاخیر برای جلوگیری از rate limit
-              sleep 2
             done
             
-            echo "✅ Total saved: $TOTAL_ITEMS items for @$CHANNEL"
-            rm -f temp_rss.xml
+            ITEM_COUNT=$(grep -c "^Date:" "$FILENAME")
+            echo "✅ Saved $ITEM_COUNT items for @$CHANNEL"
+            
+            rm -f temp.xml
           done
           
-          # حذف فایل‌های قدیمی‌تر از ۲ روز
+          # حذف فایل‌های قدیمی
           find logs/ -type f -mtime +2 -delete 2>/dev/null
 
       - name: Commit and Push
@@ -129,6 +66,4 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "Sync logs: $(date +'%Y-%m-%d %H:%M')"
             git push
-          else
-            echo "No changes to commit"
           fi
