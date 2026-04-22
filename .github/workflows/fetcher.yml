@@ -2,7 +2,7 @@ name: Multi-Channel Fetcher
 
 on:
   schedule:
-    - cron: '0 0,4,8,16 * * *' # ۴ بار در روز
+    - cron: '0 0,4,8,16 * * *'
   workflow_dispatch:
 
 jobs:
@@ -12,15 +12,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Install XML Parser
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xmlstarlet
-
       - name: Fetch and Clean Data
         run: |
-          # لیست کانال‌ها (نام یوزرنیم تلگرام بدون @)
-          CHANNELS=("asrnovin_ir" "another_channel")
+          # لیست کانال‌ها
+          CHANNELS=("asrnovin_ir")
           DATE=$(date +'%Y-%m-%d_%H-%M')
           
           mkdir -p logs
@@ -29,28 +24,59 @@ jobs:
             mkdir -p "logs/$CHANNEL"
             FILENAME="logs/$CHANNEL/${CHANNEL}_$DATE.txt"
             
-            # دریافت خروجی از ورکر
             echo "Fetching data for @$CHANNEL..."
             curl -sL --max-time 30 "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp_rss.xml
             
             if [ -s temp_rss.xml ]; then
               echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
               
-              # استخراج همزمان Date و Content با xmlstarlet
-              xmlstarlet sel -t -m "//item" -v "pubDate" -o "|" -v "description" -n temp_rss.xml 2>/dev/null | while IFS='|' read -r date desc; do
-                # حذف CDATA wrapper و whitespace اضافی
-                desc=$(echo "$desc" | sed 's/<!\[CDATA\[//;s/\]\]>//;s/^[[:space:]]*//;s/[[:space:]]*$//')
-                # حذف تگ‌های HTML اضافی اگه باشه
-                desc=$(echo "$desc" | sed 's/<[^>]*>//g')
+              # روش جدید: پردازش خط به خط با حفظ متن کامل چندخطی
+              awk '
+              BEGIN { RS = "</item>"; FS = "\n" }
+              {
+                date = ""
+                content = ""
+                full_content = ""
+                in_cdata = 0
                 
-                if [ -n "$date" ] && [ -n "$desc" ]; then
-                  echo "Date: $date" >> "$FILENAME"
-                  echo "Content: $desc" >> "$FILENAME"
-                  echo "---" >> "$FILENAME"
-                fi
-              done
+                for (i = 1; i <= NF; i++) {
+                  line = $i
+                  
+                  # استخراج pubDate
+                  if (match(line, /<pubDate>(.*)<\/pubDate>/, arr)) {
+                    date = arr[1]
+                  }
+                  
+                  # شروع CDATA
+                  if (line ~ /<description><!\[CDATA\[/) {
+                    in_cdata = 1
+                    # استخراج بخش اول بعد از CDATA[
+                    sub(/.*<!\[CDATA\[/, "", line)
+                    full_content = line
+                  }
+                  # داخل CDATA (خطوط میانی)
+                  else if (in_cdata && line !~ /\]\]><\/description>/) {
+                    full_content = full_content "\n" line
+                  }
+                  # پایان CDATA
+                  else if (in_cdata && line ~ /\]\]><\/description>/) {
+                    sub(/\].*/, "", line)
+                    full_content = full_content "\n" line
+                    in_cdata = 0
+                    # حذف whitespace اضافی از اول و آخر
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", full_content)
+                    content = full_content
+                  }
+                }
+                
+                if (date != "" && content != "") {
+                  print "Date: " date
+                  print "Content: " content
+                  print "---"
+                }
+              }
+              ' temp_rss.xml >> "$FILENAME"
               
-              # نمایش آمار ذخیره شده
               ITEM_COUNT=$(grep -c "^Date:" "$FILENAME" 2>/dev/null || echo "0")
               echo "Saved $ITEM_COUNT items for @$CHANNEL"
             else
@@ -59,21 +85,9 @@ jobs:
             
             rm -f temp_rss.xml
           done
-
-          # مدیریت حجم فایل‌ها (جلوگیری از پر شدن ریپازیتوری)
+          
+          # مدیریت حجم فایل‌ها
           if [ -d logs ]; then
-            CURRENT_LOGS_SIZE=$(du -sk logs 2>/dev/null | cut -f1)
-            MAX_ALLOWED_KB=8192 # ۸ مگابایت
-
-            echo "Current Logs Size: ${CURRENT_LOGS_SIZE:-0} KB"
-
-            if [ "${CURRENT_LOGS_SIZE:-0}" -gt $MAX_ALLOWED_KB ]; then
-              echo "Logs folder is too heavy. Deleting old files..."
-              # حذف ۵۰ فایل قدیمی‌تر برای باز شدن فضا
-              find logs -type f -name "*.txt" -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2- | head -n 50 | xargs rm -f 2>/dev/null
-            fi
-
-            # حذف فایل‌های قدیمی‌تر از ۲ روز
             find logs/ -type f -mtime +2 -delete 2>/dev/null
           fi
 
