@@ -12,84 +12,72 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Fetch and Clean Data
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Fetch and Clean Data with Python
         run: |
-          # لیست کانال‌ها
-          CHANNELS=("asrnovin_ir" "golboo1" "sillymohsen" "sootehdelan333")
-          DATE=$(date +'%Y-%m-%d_%H-%M')
+          import xml.etree.ElementTree as ET
+          import urllib.request
+          from datetime import datetime
+          import os
           
-          mkdir -p logs
+          CHANNELS = ["asrnovin_ir", "golboo1", "sillymohsen", "sootehdelan333"]
+          DATE = datetime.now().strftime('%Y-%m-%d_%H-%M')
           
-          for CHANNEL in "${CHANNELS[@]}"; do
-            mkdir -p "logs/$CHANNEL"
-            FILENAME="logs/$CHANNEL/${CHANNEL}_$DATE.txt"
+          os.makedirs('logs', exist_ok=True)
+          
+          for CHANNEL in CHANNELS:
+            os.makedirs(f'logs/{CHANNEL}', exist_ok=True)
+            filename = f'logs/{CHANNEL}/{CHANNEL}_{DATE}.txt'
             
-            echo "Fetching data for @$CHANNEL..."
-            curl -sL --max-time 30 "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp_rss.xml
+            print(f"Fetching data for @{CHANNEL}...")
             
-            if [ -s temp_rss.xml ]; then
-              echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
+            try:
+              # دریافت XML
+              url = f"https://summary-engine.hidrosummaryaibot.workers.dev/?channel={CHANNEL}"
+              with urllib.request.urlopen(url, timeout=30) as response:
+                xml_data = response.read().decode('utf-8')
               
-              # روش جدید: پردازش خط به خط با حفظ متن کامل چندخطی
-              awk '
-              BEGIN { RS = "</item>"; FS = "\n" }
-              {
-                date = ""
-                content = ""
-                full_content = ""
-                in_cdata = 0
-                
-                for (i = 1; i <= NF; i++) {
-                  line = $i
-                  
-                  # استخراج pubDate
-                  if (match(line, /<pubDate>(.*)<\/pubDate>/, arr)) {
-                    date = arr[1]
-                  }
-                  
-                  # شروع CDATA
-                  if (line ~ /<description><!\[CDATA\[/) {
-                    in_cdata = 1
-                    # استخراج بخش اول بعد از CDATA[
-                    sub(/.*<!\[CDATA\[/, "", line)
-                    full_content = line
-                  }
-                  # داخل CDATA (خطوط میانی)
-                  else if (in_cdata && line !~ /\]\]><\/description>/) {
-                    full_content = full_content "\n" line
-                  }
-                  # پایان CDATA
-                  else if (in_cdata && line ~ /\]\]><\/description>/) {
-                    sub(/\].*/, "", line)
-                    full_content = full_content "\n" line
-                    in_cdata = 0
-                    # حذف whitespace اضافی از اول و آخر
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", full_content)
-                    content = full_content
-                  }
-                }
-                
-                if (date != "" && content != "") {
-                  print "Date: " date
-                  print "Content: " content
-                  print "---"
-                }
-              }
-              ' temp_rss.xml >> "$FILENAME"
+              # پردازش XML
+              root = ET.fromstring(xml_data)
+              items = root.findall('.//item')
               
-              ITEM_COUNT=$(grep -c "^Date:" "$FILENAME" 2>/dev/null || echo "0")
-              echo "Saved $ITEM_COUNT items for @$CHANNEL"
-            else
-              echo "⚠️ Warning: Empty response for @$CHANNEL"
-            fi
-            
-            rm -f temp_rss.xml
-          done
+              print(f"  Found {len(items)} items in XML")
+              
+              with open(filename, 'w', encoding='utf-8') as f:
+                f.write(f"--- {CHANNEL} | {DATE} ---\n")
+                
+                for item in items:
+                  date_elem = item.find('pubDate')
+                  desc_elem = item.find('description')
+                  
+                  if date_elem is not None and desc_elem is not None:
+                    date = date_elem.text
+                    content = desc_elem.text
+                    
+                    # حذف CDATA wrapper اگه باشه
+                    if content and content.startswith('<![CDATA['):
+                      content = content[9:-3]
+                    
+                    f.write(f"Date: {date}\n")
+                    f.write(f"Content: {content}\n")
+                    f.write(f"---\n")
+              
+              # شمارش آیتم‌ها
+              with open(filename, 'r', encoding='utf-8') as f:
+                count = sum(1 for line in f if line.startswith('Date:'))
+              
+              print(f"✅ Saved {count} items for @{CHANNEL}")
+              
+            except Exception as e:
+              print(f"⚠️ Error for @{CHANNEL}: {e}")
           
-          # مدیریت حجم فایل‌ها
-          if [ -d logs ]; then
-            find logs/ -type f -mtime +2 -delete 2>/dev/null
-          fi
+          # حذف فایل‌های قدیمی
+          os.system('find logs/ -type f -mtime +2 -delete 2>/dev/null')
+        shell: python
 
       - name: Commit and Push
         run: |
