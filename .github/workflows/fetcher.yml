@@ -1,0 +1,61 @@
+name: Multi-Channel Fetcher
+
+on:
+  schedule:
+    - cron: '0 4,8,16,0 * * *'
+  workflow_dispatch:
+
+jobs:
+  update_logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Fetch and Clean Data
+        run: |
+          CHANNELS=("asrnovin_ir" "another_channel")
+          DATE=$(date +'%Y-%m-%d_%H-%M')
+          
+          # ایجاد پوشه اصلی اگر وجود ندارد
+          mkdir -p logs
+          
+          for CHANNEL in "${CHANNELS[@]}"; do
+            mkdir -p "logs/$CHANNEL"
+            FILENAME="logs/$CHANNEL/${CHANNEL}_$DATE.txt"
+            
+            curl -sL --max-time 30 "https://summary-engine.hidrosummaryaibot.workers.dev/?channel=$CHANNEL" -o temp_rss.xml
+            
+            if [ -s temp_rss.xml ]; then
+              echo "--- $CHANNEL | $DATE ---" > "$FILENAME"
+              grep -E '<pubDate>|<description>' temp_rss.xml | \
+              sed -e 's/<[^>]*>//g' -e 's/<!\[CDATA\[//g' -e 's/\]\]>//g' -e 's/^[[:space:]]*//' >> "$FILENAME"
+            fi
+            rm -f temp_rss.xml
+          done
+
+          # --- مدیریت حجم فایل‌های جاری (برای ZIP خروجی) ---
+          # محاسبه حجم پوشه logs به کیلوبایت
+          CURRENT_LOGS_SIZE=$(du -sk logs | cut -f1)
+          MAX_ALLOWED_KB=8192 # ۸ مگابایت رزرو می‌کنیم که با بقیه فایل‌ها از ۱۰ رد نشود
+
+          echo "Current Logs Size: $CURRENT_LOGS_SIZE KB"
+
+          if [ $CURRENT_LOGS_SIZE -gt $MAX_ALLOWED_KB ]; then
+            echo "Logs folder is too heavy. Deleting old files..."
+            # حذف فایل‌ها از قدیمی به جدید تا زمانی که حجم به زیر ۵ مگابایت برسد
+            find logs -type f -name "*.txt" -printf '%T@ %p\n' | sort -n | cut -d' ' -f2- | head -n 50 | xargs rm -f
+          fi
+
+          # حذف روزانه فایل‌های قدیمی (بیشتر از ۲ روز) برای خلوت ماندن
+          find logs/ -type f -mtime +2 -delete
+
+      - name: Commit and Push
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Action"
+          git add logs/
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync logs: $(date +'%Y-%m-%d %H:%M')"
+            git push
+          fi
