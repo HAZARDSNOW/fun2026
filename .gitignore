@@ -1,0 +1,30 @@
+```
+# Compiled and build artifacts
+*.o
+*.obj
+*.out
+server
+
+# Dependencies
+vendor/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Go-specific
+*.exe
+*.dll
+*.so
+*.a
+*.dylib
+```
