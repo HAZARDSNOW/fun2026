@@ -1,5 +1,8 @@
-module auth-service
+module twitter-clone
 
 go 1.19
 
-require golang.org/x/crypto v0.51.0 // indirect
+require (
+	github.com/golang-jwt/jwt/v5 v5.2.0
+	golang.org/x/crypto v0.17.0
+)
